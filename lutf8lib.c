@@ -42,6 +42,23 @@ static lua_Integer u_posrelat (lua_Integer pos, size_t len) {
 }
 
 
+typedef struct Utf8Range {
+  lua_Integer start;
+  lua_Integer end;
+} Utf8Range;
+
+
+/* Single-codepoint queries default the end position to the start. */
+static Utf8Range utf8_range (lua_State *L, size_t len, lua_Integer enddef,
+                             int endatstart) {
+  Utf8Range range;
+  range.start = u_posrelat(luaL_optinteger(L, 2, 1), len);
+  if (endatstart) enddef = range.start;
+  range.end = u_posrelat(luaL_optinteger(L, 3, enddef), len);
+  return range;
+}
+
+
 /*
 ** Decode one UTF-8 sequence, returning NULL if byte sequence is
 ** invalid.  The array 'limits' stores the minimum value for each
@@ -88,21 +105,20 @@ static int utflen (lua_State *L) {
   lua_Integer n = 0;  /* counter for the number of characters */
   size_t len;  /* string length in bytes */
   const char *s = luaL_checklstring(L, 1, &len);
-  lua_Integer posi = u_posrelat(luaL_optinteger(L, 2, 1), len);
-  lua_Integer posj = u_posrelat(luaL_optinteger(L, 3, -1), len);
+  Utf8Range range = utf8_range(L, len, -1, 0);
   int lax = lua_toboolean(L, 4);
-  luaL_argcheck(L, 1 <= posi && --posi <= (lua_Integer)len, 2,
+  luaL_argcheck(L, 1 <= range.start && --range.start <= (lua_Integer)len, 2,
                    "initial position out of bounds");
-  luaL_argcheck(L, --posj < (lua_Integer)len, 3,
+  luaL_argcheck(L, --range.end < (lua_Integer)len, 3,
                    "final position out of bounds");
-  while (posi <= posj) {
-    const char *s1 = utf8_decode(s + posi, NULL, !lax);
+  while (range.start <= range.end) {
+    const char *s1 = utf8_decode(s + range.start, NULL, !lax);
     if (s1 == NULL) {  /* conversion error? */
       luaL_pushfail(L);  /* return fail ... */
-      lua_pushinteger(L, posi + 1);  /* ... and current position */
+      lua_pushinteger(L, range.start + 1);  /* ... and current position */
       return 2;
     }
-    posi = ct_diff2S(s1 - s);
+    range.start = ct_diff2S(s1 - s);
     n++;
   }
   lua_pushinteger(L, n);
@@ -117,21 +133,20 @@ static int utflen (lua_State *L) {
 static int codepoint (lua_State *L) {
   size_t len;
   const char *s = luaL_checklstring(L, 1, &len);
-  lua_Integer posi = u_posrelat(luaL_optinteger(L, 2, 1), len);
-  lua_Integer pose = u_posrelat(luaL_optinteger(L, 3, posi), len);
+  Utf8Range range = utf8_range(L, len, 0, 1);
   int lax = lua_toboolean(L, 4);
   int n;
   const char *se;
-  luaL_argcheck(L, posi >= 1, 2, "out of bounds");
-  luaL_argcheck(L, pose <= (lua_Integer)len, 3, "out of bounds");
-  if (posi > pose) return 0;  /* empty interval; return no values */
-  if (pose - posi >= INT_MAX)  /* (lua_Integer -> int) overflow? */
+  luaL_argcheck(L, range.start >= 1, 2, "out of bounds");
+  luaL_argcheck(L, range.end <= (lua_Integer)len, 3, "out of bounds");
+  if (range.start > range.end) return 0;  /* empty interval */
+  if (range.end - range.start >= INT_MAX)  /* integer overflow? */
     return luaL_error(L, "string slice too long");
-  n = (int)(pose -  posi) + 1;  /* upper bound for number of returns */
+  n = (int)(range.end - range.start) + 1;  /* upper bound for returns */
   luaL_checkstack(L, n, "string slice too long");
-  n = 0;  /* count the number of returns */
-  se = s + pose;  /* string end */
-  for (s += posi - 1; s < se;) {
+  n = 0;
+  se = s + range.end;
+  for (s += range.start - 1; s < se;) {
     l_uint32 code;
     s = utf8_decode(s, &code, !lax);
     if (s == NULL)

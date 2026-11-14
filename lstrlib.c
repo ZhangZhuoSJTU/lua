@@ -82,53 +82,116 @@ static size_t getendpos (lua_State *L, int arg, lua_Integer def,
 }
 
 
+typedef struct StringRange {
+  size_t start;
+  size_t end;
+} StringRange;
+
+
+static StringRange string_range (lua_State *L, size_t len, int startarg,
+                                 int endarg, lua_Integer enddef) {
+  StringRange range;
+  lua_Integer start = luaL_optinteger(L, startarg, 1);
+  range.start = posrelatI(start, len);
+  range.end = getendpos(L, endarg, enddef, len);
+  return range;
+}
+
+
+/* Empty ranges produce no bytes. */
+static size_t range_length (StringRange range) {
+  return (range.start <= range.end) ? range.end - range.start + 1 : 0;
+}
+
+
 static int str_sub (lua_State *L) {
-  size_t l;
-  const char *s = luaL_checklstring(L, 1, &l);
-  size_t start = posrelatI(luaL_checkinteger(L, 2), l);
-  size_t end = getendpos(L, 3, -1, l);
-  if (start <= end)
-    lua_pushlstring(L, s + start - 1, (end - start) + 1);
-  else lua_pushliteral(L, "");
+  size_t len;
+  const char *s = luaL_checklstring(L, 1, &len);
+  StringRange range = string_range(L, len, 2, 3, -1);
+  size_t length = range_length(range);
+  if (length > 0)
+    lua_pushlstring(L, s + range.start - 1, length);
+  else
+    lua_pushliteral(L, "");
+  return 1;
+}
+
+
+typedef char (*ByteTransform) (const char *s, size_t len, size_t i);
+
+
+static char reverse_byte (const char *s, size_t len, size_t i) {
+  return s[len - i - 1];
+}
+
+
+static char lower_byte (const char *s, size_t len, size_t i) {
+  (void)len;
+  return cast_char(tolower(cast_uchar(s[i])));
+}
+
+
+static char upper_byte (const char *s, size_t len, size_t i) {
+  (void)len;
+  return cast_char(toupper(cast_uchar(s[i])));
+}
+
+
+/* Apply a length-preserving transformation to each byte. */
+static int transform_string (lua_State *L, ByteTransform transform) {
+  size_t len, i;
+  luaL_Buffer b;
+  const char *s = luaL_checklstring(L, 1, &len);
+  char *p = luaL_buffinitsize(L, &b, len);
+  for (i = 0; i < len; i++)
+    p[i] = transform(s, len, i);
+  luaL_pushresultsize(&b, len);
   return 1;
 }
 
 
 static int str_reverse (lua_State *L) {
-  size_t l, i;
-  luaL_Buffer b;
-  const char *s = luaL_checklstring(L, 1, &l);
-  char *p = luaL_buffinitsize(L, &b, l);
-  for (i = 0; i < l; i++)
-    p[i] = s[l - i - 1];
-  luaL_pushresultsize(&b, l);
-  return 1;
+  return transform_string(L, reverse_byte);
 }
 
 
 static int str_lower (lua_State *L) {
-  size_t l;
-  size_t i;
-  luaL_Buffer b;
-  const char *s = luaL_checklstring(L, 1, &l);
-  char *p = luaL_buffinitsize(L, &b, l);
-  for (i=0; i<l; i++)
-    p[i] = cast_char(tolower(cast_uchar(s[i])));
-  luaL_pushresultsize(&b, l);
-  return 1;
+  return transform_string(L, lower_byte);
 }
 
 
 static int str_upper (lua_State *L) {
-  size_t l;
-  size_t i;
-  luaL_Buffer b;
-  const char *s = luaL_checklstring(L, 1, &l);
-  char *p = luaL_buffinitsize(L, &b, l);
-  for (i=0; i<l; i++)
-    p[i] = cast_char(toupper(cast_uchar(s[i])));
-  luaL_pushresultsize(&b, l);
+  return transform_string(L, upper_byte);
+}
+
+
+/* Compute the space used by repeated content and its separators. */
+static int repeat_size (size_t len, size_t lsep, lua_Integer n,
+                        size_t *totallen) {
+  size_t count = cast_sizet(n);
+  size_t text = len * count;
+  size_t separators = lsep * (count - 1);
+  if (!l_sizeadd(&text, separators))
+    return 0;
+  *totallen = text;
   return 1;
+}
+
+
+/* The final repetition omits the separator. */
+static void fill_repeated (char *p, const char *s, size_t len,
+                           const char *sep, size_t lsep, lua_Integer n) {
+  while (n-- > 1) {
+    memcpy(p, s, len * sizeof(char));
+    p += len;
+    if (lsep == 1)
+      *p++ = *sep;
+    else if (lsep > 0) {
+      memcpy(p, sep, lsep * sizeof(char));
+      p += lsep;
+    }
+  }
+  memcpy(p, s, len * sizeof(char));
 }
 
 
@@ -138,25 +201,25 @@ static int str_upper (lua_State *L) {
 */
 static int str_rep (lua_State *L) {
   size_t len, lsep;
+  size_t totallen;
   const char *s = luaL_checklstring(L, 1, &len);
   lua_Integer n = luaL_checkinteger(L, 2);
   const char *sep = luaL_optlstring(L, 3, "", &lsep);
   if (n <= 0 || (len | lsep) == 0)
     lua_pushliteral(L, "");  /* no repetitions or both strings empty */
-  else if (l_unlikely(len > MAX_SIZE - lsep ||
-               cast_st2S(len + lsep) > cast_st2S(MAX_SIZE) / n))
-    return luaL_error(L, "resulting string too large");
   else {
-    size_t totallen = (cast_sizet(n) * (len + lsep)) - lsep;
     luaL_Buffer b;
-    char *p = luaL_buffinitsize(L, &b, totallen);
-    while (n-- > 1) {  /* first n-1 copies (followed by separator) */
-      memcpy(p, s, len * sizeof(char)); p += len;
-      if (lsep > 0) {  /* empty 'memcpy' is not that cheap */
-        memcpy(p, sep, lsep * sizeof(char)); p += lsep;
-      }
+    char *p;
+    if (lsep <= 1) {
+      if (l_unlikely(len > MAX_SIZE - lsep ||
+                     cast_st2S(len + lsep) > cast_st2S(MAX_SIZE) / n))
+        return luaL_error(L, "resulting string too large");
+      totallen = cast_sizet(n) * (len + lsep) - lsep;
     }
-    memcpy(p, s, len * sizeof(char));  /* last copy without separator */
+    else if (l_unlikely(!repeat_size(len, lsep, n, &totallen)))
+      return luaL_error(L, "resulting string too large");
+    p = luaL_buffinitsize(L, &b, totallen);
+    fill_repeated(p, s, len, sep, lsep, n);
     luaL_pushresultsize(&b, totallen);
   }
   return 1;
@@ -164,19 +227,20 @@ static int str_rep (lua_State *L) {
 
 
 static int str_byte (lua_State *L) {
-  size_t l;
-  const char *s = luaL_checklstring(L, 1, &l);
-  lua_Integer pi = luaL_optinteger(L, 2, 1);
-  size_t posi = posrelatI(pi, l);
-  size_t pose = getendpos(L, 3, pi, l);
+  size_t len;
+  const char *s = luaL_checklstring(L, 1, &len);
+  lua_Integer first = luaL_optinteger(L, 2, 1);
+  StringRange range = string_range(L, len, 2, 3, first);
+  size_t length = range_length(range);
   int n, i;
-  if (posi > pose) return 0;  /* empty interval; return no values */
-  if (l_unlikely(pose - posi >= (size_t)INT_MAX))  /* arithmetic overflow? */
+  if (length == 0)
+    return 0;
+  if (l_unlikely(length - 1 >= (size_t)INT_MAX))
     return luaL_error(L, "string slice too long");
-  n = (int)(pose -  posi) + 1;
+  n = (int)length;
   luaL_checkstack(L, n, "string slice too long");
-  for (i=0; i<n; i++)
-    lua_pushinteger(L, cast_uchar(s[posi + cast_uint(i) - 1]));
+  for (i = 0; i < n; i++)
+    lua_pushinteger(L, cast_uchar(s[range.start + cast_uint(i) - 1]));
   return n;
 }
 
@@ -1608,6 +1672,15 @@ static void copywithendian (char *dest, const char *src,
 }
 
 
+/* Preserve the source representation unless the byte order differs. */
+static void packnumber (luaL_Buffer *b, const void *value,
+                        unsigned size, int islittle) {
+  char *buff = luaL_prepbuffsize(b, size);
+  copywithendian(buff, (const char *)value, size, islittle);
+  luaL_addsize(b, size);
+}
+
+
 static int str_pack (lua_State *L) {
   luaL_Buffer b;
   Header h;
@@ -1646,27 +1719,18 @@ static int str_pack (lua_State *L) {
         break;
       }
       case Kfloat: {  /* C float */
-        float f = (float)luaL_checknumber(L, arg);  /* get argument */
-        char *buff = luaL_prepbuffsize(&b, sizeof(f));
-        /* move 'f' to final result, correcting endianness if needed */
-        copywithendian(buff, (char *)&f, sizeof(f), h.islittle);
-        luaL_addsize(&b, size);
+        float f = (float)luaL_checknumber(L, arg);
+        packnumber(&b, &f, cast_uint(sizeof(f)), h.islittle);
         break;
       }
       case Knumber: {  /* Lua float */
-        lua_Number f = luaL_checknumber(L, arg);  /* get argument */
-        char *buff = luaL_prepbuffsize(&b, sizeof(f));
-        /* move 'f' to final result, correcting endianness if needed */
-        copywithendian(buff, (char *)&f, sizeof(f), h.islittle);
-        luaL_addsize(&b, size);
+        lua_Number f = luaL_checknumber(L, arg);
+        packnumber(&b, &f, cast_uint(sizeof(f)), h.islittle);
         break;
       }
       case Kdouble: {  /* C double */
-        double f = (double)luaL_checknumber(L, arg);  /* get argument */
-        char *buff = luaL_prepbuffsize(&b, sizeof(f));
-        /* move 'f' to final result, correcting endianness if needed */
-        copywithendian(buff, (char *)&f, sizeof(f), h.islittle);
-        luaL_addsize(&b, size);
+        double f = (double)luaL_checknumber(L, arg);
+        packnumber(&b, &f, cast_uint(sizeof(f)), h.islittle);
         break;
       }
       case Kchar: {  /* fixed-size string */
@@ -1726,9 +1790,8 @@ static int str_packsize (lua_State *L) {
     luaL_argcheck(L, opt != Kstring && opt != Kzstr, 1,
                      "variable-length format");
     size += ntoalign;  /* total space used by option */
-    luaL_argcheck(L, totalsize <= MAX_SIZE - size,
+    luaL_argcheck(L, l_sizeadd(&totalsize, size),
                      1, "format result too large");
-    totalsize += size;
   }
   lua_pushinteger(L, cast_st2S(totalsize));
   return 1;

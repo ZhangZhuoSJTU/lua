@@ -59,6 +59,10 @@ typedef lu_byte TStatus;
 #define MAX_SIZE	(sizeof(size_t) < sizeof(lua_Integer) ? MAX_SIZET \
 			  : cast_sizet(LUA_MAXINTEGER))
 
+/* add a contribution to an accumulated object size */
+#define l_sizeadd(total,size) \
+  ((*(total) += (size)), (*(total) <= MAX_SIZE))
+
 /*
 ** test whether an unsigned value is a power of 2 (or zero)
 */
