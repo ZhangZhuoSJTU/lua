@@ -98,6 +98,7 @@ static StringRange string_range (lua_State *L, size_t len, int startarg,
 }
 
 
+/* Empty ranges produce no bytes. */
 static size_t range_length (StringRange range) {
   return (range.start <= range.end) ? range.end - range.start + 1 : 0;
 }
@@ -136,6 +137,7 @@ static char upper_byte (const char *s, size_t len, size_t i) {
 }
 
 
+/* Apply a length-preserving transformation to each byte. */
 static int transform_string (lua_State *L, ByteTransform transform) {
   size_t len, i;
   luaL_Buffer b;
@@ -169,17 +171,22 @@ static int repeat_size (size_t len, size_t lsep, lua_Integer n,
   size_t count = cast_sizet(n);
   size_t text = len * count;
   size_t separators = lsep * (count - 1);
-  *totallen = text + separators;
-  return *totallen <= MAX_SIZE;
+  if (!l_sizeadd(&text, separators))
+    return 0;
+  *totallen = text;
+  return 1;
 }
 
 
+/* The final repetition omits the separator. */
 static void fill_repeated (char *p, const char *s, size_t len,
                            const char *sep, size_t lsep, lua_Integer n) {
   while (n-- > 1) {
     memcpy(p, s, len * sizeof(char));
     p += len;
-    if (lsep > 0) {
+    if (lsep == 1)
+      *p++ = *sep;
+    else if (lsep > 0) {
       memcpy(p, sep, lsep * sizeof(char));
       p += lsep;
     }
@@ -200,11 +207,18 @@ static int str_rep (lua_State *L) {
   const char *sep = luaL_optlstring(L, 3, "", &lsep);
   if (n <= 0 || (len | lsep) == 0)
     lua_pushliteral(L, "");  /* no repetitions or both strings empty */
-  else if (l_unlikely(!repeat_size(len, lsep, n, &totallen)))
-    return luaL_error(L, "resulting string too large");
   else {
     luaL_Buffer b;
-    char *p = luaL_buffinitsize(L, &b, totallen);
+    char *p;
+    if (lsep <= 1) {
+      if (l_unlikely(len > MAX_SIZE - lsep ||
+                     cast_st2S(len + lsep) > cast_st2S(MAX_SIZE) / n))
+        return luaL_error(L, "resulting string too large");
+      totallen = cast_sizet(n) * (len + lsep) - lsep;
+    }
+    else if (l_unlikely(!repeat_size(len, lsep, n, &totallen)))
+      return luaL_error(L, "resulting string too large");
+    p = luaL_buffinitsize(L, &b, totallen);
     fill_repeated(p, s, len, sep, lsep, n);
     luaL_pushresultsize(&b, totallen);
   }
@@ -1658,6 +1672,7 @@ static void copywithendian (char *dest, const char *src,
 }
 
 
+/* Preserve the source representation unless the byte order differs. */
 static void packnumber (luaL_Buffer *b, const void *value,
                         unsigned size, int islittle) {
   char *buff = luaL_prepbuffsize(b, size);
@@ -1775,9 +1790,8 @@ static int str_packsize (lua_State *L) {
     luaL_argcheck(L, opt != Kstring && opt != Kzstr, 1,
                      "variable-length format");
     size += ntoalign;  /* total space used by option */
-    luaL_argcheck(L, totalsize <= MAX_SIZE - size,
+    luaL_argcheck(L, l_sizeadd(&totalsize, size),
                      1, "format result too large");
-    totalsize += size;
   }
   lua_pushinteger(L, cast_st2S(totalsize));
   return 1;

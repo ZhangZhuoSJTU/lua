@@ -48,6 +48,7 @@ typedef struct Utf8Range {
 } Utf8Range;
 
 
+/* Single-codepoint queries default the end position to the start. */
 static Utf8Range utf8_range (lua_State *L, size_t len, lua_Integer enddef,
                              int endatstart) {
   Utf8Range range;
